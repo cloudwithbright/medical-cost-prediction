@@ -1,0 +1,18 @@
+name: env
+channels:
+  - default
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - gunicorn==20.1.0
+    - azure-storage-blob
+    - fastapi[all]==0.70.1
+    - azure-identity==1.7.0
+    - uvicorn[standard]==0.15.0
+    - notebook
+    - scikit-learn
+    - numpy
+    - pandas
+    - matplotlib
+    - seaborn

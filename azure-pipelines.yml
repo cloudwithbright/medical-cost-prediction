@@ -1,0 +1,419 @@
+trigger:
+  branches:
+    include:
+      - master
+
+variables:
+
+  - name: dataset-url
+    value: https://publicimages0.blob.core.windows.net/datasets/Tabular/modecal_cost/medical_cost.zip
+
+  - name: location
+    value: eastus
+
+  - name: resource-group
+    value: medical-cost
+
+  - name: containerapp-environment
+    value: env-medical-cost-prediction
+
+  - name: subscription
+    value: 'Data Science IAC'
+
+  - name: containerRegistry
+    value: cloudwithdeb
+
+  - name: repository
+    value: cloudwithdeb
+
+  - name: containerapp-name
+    value: medical-cost
+
+  - name: image-name
+    value: $(repository)/medical-cost:latest
+  
+  - name: containerapp-environment-name
+    value: medical-cost
+  
+  - name: ingress
+    value: external
+
+  - name: storage-account
+    value: modicalcost06601
+
+  - name: kind
+    value: StorageV2
+
+  - name: containerapp-log-analytics
+    value: medical-cost
+  
+  - name: storage-account-container
+    value: medical-cost
+
+stages:
+
+  # Run Test on module
+  - stage: TestAndBuildModule
+    jobs:
+
+      # Test Module Performance
+      - job: TestModule
+        displayName: Validate module accuracy
+        steps:
+
+          # Setup python version to use in your pipeline
+          - task: UsePythonVersion@0
+            displayName: Set python version
+            inputs:
+              versionSpec: '3.10'
+              addToPath: true
+              architecture: 'x64'
+
+          # Install python packages in requirements.txt file
+          - task: Bash@3
+            displayName: Install python packages
+            inputs:
+              targetType: 'inline'
+              script: |
+                pip install -r requirements.txt
+              workingDirectory: '$(System.DefaultWorkingDirectory)/'
+
+          # Download dataset to be used run test
+          - task: Bash@3
+            displayName: Download Dataset
+            inputs:
+              targetType: 'inline'
+              script: |
+                wget $(dataset-url)
+                mv medical_cost.zip ../data
+              workingDirectory: '$(System.DefaultWorkingDirectory)/notebooks'
+
+          # Extract dataset from zip file
+          - task: PythonScript@0
+            displayName: Extract dataset from zip file
+            inputs:
+              scriptSource: 'inline'
+              script: |
+                import zipfile
+                data=zipfile.ZipFile("../data/medical_cost.zip")
+                data.extractall("../data/")
+                data.close()
+              workingDirectory: '$(System.DefaultWorkingDirectory)/notebooks'
+
+          # Run unittest
+          - task: Bash@3
+            continueOnError: false
+            displayName: Run unittest
+            inputs:
+              targetType: 'inline'
+              script: |
+                pytest -v -s
+              workingDirectory: '$(System.DefaultWorkingDirectory)/model'
+
+      # Train Module After Test Passed
+      - job: BuildModel
+        dependsOn: TestModule
+        condition: succeeded()
+        steps:
+          
+          # Use python version
+          - task: UsePythonVersion@0
+            displayName: Set python version
+            inputs:
+              versionSpec: '3.10'
+              addToPath: true
+              architecture: 'x64'
+
+          # Install python packages from requirements.txt file
+          - task: Bash@3
+            displayName: Install python packages
+            inputs:
+              targetType: 'inline'
+              script: |
+                pip install -r requirements.txt
+              workingDirectory: '$(System.DefaultWorkingDirectory)/'
+
+          # Download dataset to be used to build our model
+          - task: Bash@3
+            displayName: Download Dataset
+            inputs:
+              targetType: 'inline'
+              script: |
+                wget $(dataset-url)
+                mv medical_cost.zip ../data
+              workingDirectory: '$(System.DefaultWorkingDirectory)/notebooks'
+
+          # Extract dataset from zipfile
+          - task: PythonScript@0
+            displayName: Extract dataset from zip file
+            inputs:
+              scriptSource: 'inline'
+              script: |
+                import zipfile
+                data=zipfile.ZipFile("../data/medical_cost.zip")
+                data.extractall("../data/")
+                data.close()
+              workingDirectory: '$(System.DefaultWorkingDirectory)/notebooks'
+
+          # Train model and save model locally
+          - task: Bash@3
+            displayName: Train model
+            inputs:
+              targetType: 'inline'
+              script: |
+                mkdir module
+                python train.py
+                mv model.pkl module
+              workingDirectory: '$(System.DefaultWorkingDirectory)/model'
+
+          # Publish generated model
+          - task: PublishPipelineArtifact@1
+            displayName: publish model as an artifact
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/model/module'
+              artifact: 'drop'
+              publishLocation: 'pipeline'
+
+  - stage: DockerizeApiEndpoint
+    dependsOn: TestAndBuildModule
+    condition: succeeded()
+    jobs:
+
+      # Test Model Endpoint
+      - job: TestEndpoint
+        steps:
+
+          # Use python versioon
+          - task: UsePythonVersion@0
+            displayName: Set python version
+            inputs:
+              versionSpec: '3.10'
+              addToPath: true
+              architecture: 'x64'
+
+          # Download model from artifact
+          - task: DownloadPipelineArtifact@2
+            displayName: Download model
+            inputs:
+              buildType: 'current'
+              artifactName: 'drop'
+              targetPath: '$(System.DefaultWorkingDirectory)/api'
+          
+          # Install python packages
+          - task: Bash@3
+            displayName: Install python packages
+            inputs:
+              targetType: 'inline'
+              script: |
+                pip install -r requirements.txt
+              workingDirectory: '$(System.DefaultWorkingDirectory)/api'
+
+          # Run unittest on endpoint build fro model
+          - task: Bash@3
+            displayName: Run unittest
+            inputs:
+              targetType: 'inline'
+              script: |
+                pytest -v -s
+              workingDirectory: '$(System.DefaultWorkingDirectory)/api'
+      
+      # Dockerize model and push to dockerhub
+      - job: DockerizeEndpoint
+        dependsOn: TestEndpoint
+        condition: succeeded()
+        steps:
+    
+          - task: Docker@2
+            displayName: Build and push image to dockerhub
+            inputs:
+              containerRegistry: '$(containerRegistry)'
+              repository: '$(repository)/medical-cost'
+              command: 'buildAndPush'
+              Dockerfile: '$(System.DefaultWorkingDirectory)/api/Dockerfile'
+              tags: |
+                $(Build.BuildId)
+                latest
+
+  - stage: DeployInfrastructure
+    dependsOn: 
+      - TestAndBuildModule
+      - DockerizeApiEndpoint
+    condition: succeeded()
+    jobs:
+
+      - job: DeployResources
+        steps:
+           
+           # Enable containerapp extension on runner
+          - task: AzureCLI@2
+            displayName: Enable containerapp extension
+            inputs:
+              azureSubscription: '$(subscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: 'az extension add -n containerapp'
+
+          # Create resource group to place containerapp init
+          - task: AzureCLI@2
+            displayName: Create resource group
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: az group create --location $(location) --name $(resource-group)
+
+          # Create log analytics workspace
+          - task: AzureCLI@2
+            displayName: create log analytics for containerapp
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az monitor log-analytics workspace create \
+                -n $(containerapp-log-analytics) \
+                -g $(resource-group) 
+
+          # Create containerapp environment
+          - task: AzureCLI@2
+            displayName: create containerapp environment
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                WORKSPACE_ID=`az monitor log-analytics workspace show --query customerId -g $(resource-group) -n $(containerapp-log-analytics) -o tsv | tr -d '[:space:]'`
+                WORKSPACE_PRIMARY_KEY=`az monitor log-analytics workspace get-shared-keys --query primarySharedKey -g $(resource-group) -n $(containerapp-environment-name) -o tsv | tr -d '[:space:]'`
+                az containerapp env create \
+                --logs-workspace-key $WORKSPACE_PRIMARY_KEY \
+                --resource-group $(resource-group) \
+                --name $(containerapp-environment-name) \
+                --logs-workspace-id $WORKSPACE_ID \
+                --location $(location) 
+     
+          # Deploy containerapp
+          - task: AzureCLI@2
+            displayName: Deploy containerapp
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az containerapp create \
+                -n $(containerapp-name) \
+                -g $(resource-group) \
+                --image $(image-name) \
+                --environment $(containerapp-environment-name) \
+                --ingress $(ingress) \
+                --target-port 8000 \
+                --query properties.configuration.ingress.fqdn \
+                --min-replicas 0 \
+                --max-replicas 10 \
+                --tags \
+                name='$(containerapp-name)' \
+                purpose='To be used to predict medical charges' \
+                --env-vars \
+                STORAGE_ACCOUNT_URL='https://$(storage-account).blob.core.windows.net/' \
+                STORAGE_ACCOUNT_CONTAINER_NAME='$(storage-account-container)'
+        
+          # Enable managed identity on containerapp
+          - task: AzureCLI@2
+            displayName: Enable managed identity on containerapp
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az containerapp identity assign \
+                -n $(containerapp-name) \
+                -g $(resource-group) \
+                  --system-assigned
+          
+          # Deploy storage account to upload model into
+          - task: AzureCLI@2
+            displayName: Deploy storage account
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az storage account create \
+                -n $(storage-account) \
+                -g $(resource-group) \
+                --kind $(kind) \
+                -l $(location)
+
+          # Give containerapp permision to download model from storage account
+          - task: AzureCLI@2
+            displayName: grant containerapp permision to download model
+            inputs:
+              azureSubscription: '$(subscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                CONTAINER_APP_ID="/subscriptions/$(subscriptionID)/resourceGroups/$(resource-group)/providers/Microsoft.App/containerApps/$(containerapp-name)"
+                MANAGED_IDENTITY_ID=$(az resource show --ids $CONTAINER_APP_ID --query "identity.principalId" -o tsv | tr -d '[:space:]')
+                az role assignment create --role "Storage Blob Data Owner" --assignee-object-id $MANAGED_IDENTITY_ID --assignee-principal-type ServicePrincipal \
+                --scope '/subscriptions/$(subscriptionID)/resourceGroups/$(resource-group)/providers/Microsoft.Storage/storageAccounts/$(storage-account)'
+
+          # Create storage container for model
+          - task: AzureCLI@2
+            displayName: Create container
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az storage container create \
+                --name '$(storage-account-container)' \
+                --account-name $(storage-account) \
+                --resource-group $(resource-group)
+        
+      - job: UploadModelToStorageAccount
+        pool: 
+          vmImage: 'windows-latest'
+        dependsOn: DeployResources
+        condition: succeeded()
+        steps:
+
+          # Download model from pipeline artifacts
+          - task: DownloadPipelineArtifact@2
+            displayName: Download model
+            inputs:
+              buildType: 'current'
+              artifactName: 'drop'
+              targetPath: '$(System.DefaultWorkingDirectory)/api'
+          
+          # Move model into a new directory
+          - task: AzureCLI@2
+            displayName: Move model into a directory
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                mkdir module
+                mv model.pkl module
+              workingDirectory: '$(System.DefaultWorkingDirectory)/api'
+
+          # Delete existing model from storage account container
+          - task: AzureCLI@2
+            displayName: Delete model from storage container
+            inputs:
+              azureSubscription: $(subscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az storage blob delete-batch \
+                --source '$(storage-account-container)' \
+                --account-name $(storage-account)
+
+          # Copy model into storage account
+          - task: AzureFileCopy@3
+            displayName: Copy model into storage account
+            inputs:
+              SourcePath: '$(System.DefaultWorkingDirectory)/api/module/'
+              azureSubscription: '$(subscription)'
+              Destination: 'AzureBlob'
+              storage: '$(storage-account)'
+              ContainerName: '$(storage-account-container)'

@@ -1,0 +1,15 @@
+model/venv
+api/venv
+model/.ipynb_checkpoints
+model/medical_cost.zip
+model/medical-cost.csv
+model/medical_cost.zip.1
+model/model.pkl
+.pytest_cache
+.vscode
+venv
+data/medical_cost.zip
+data/medical-cost.csv
+api/model.pkl
+model.pkl
+env

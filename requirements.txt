@@ -1,0 +1,9 @@
+gunicorn==20.1.0
+azure-storage-blob
+fastapi[all]==0.70.1
+azure-identity==1.7.0
+uvicorn[standard]==0.15.0
+scikit-learn
+pandas
+numpy
+pytest
